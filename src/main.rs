@@ -69,6 +69,8 @@ fn main() -> Result<()> {
             Format::Md
         },
         tokens: cli.tokens,
+        // Don't re-pack the output file if it lives inside the target directory.
+        skip_path: cli.output.as_ref().and_then(|p| p.canonicalize().ok()),
     };
 
     if !cli.path.is_dir() {

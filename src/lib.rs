@@ -39,6 +39,9 @@ pub struct Options {
     pub format: Format,
     /// Include an approximate token count in the summary.
     pub tokens: bool,
+    /// Absolute path to skip during the walk (e.g. the --output file when it
+    /// lives inside the target directory, so a previous run is not re-packed).
+    pub skip_path: Option<std::path::PathBuf>,
 }
 
 impl Default for Options {
@@ -52,6 +55,7 @@ impl Default for Options {
             tree: true,
             format: Format::Md,
             tokens: false,
+            skip_path: None,
         }
     }
 }
@@ -65,6 +69,8 @@ pub enum EntryKind {
     Binary,
     /// A file larger than `max_size` (contents omitted); carries its size.
     TooLarge(u64),
+    /// A file that could not be read (permission denied, vanished, etc.).
+    Unreadable,
 }
 
 /// One collected file, identified by its repo-relative path (forward slashes).
@@ -78,8 +84,14 @@ pub struct Entry {
 /// Decimal units (MB) use 1000, binary units (MiB) use 1024.
 pub fn parse_size(input: &str) -> Result<u64> {
     let s = input.trim();
-    let split = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
-    let (num, unit) = s.split_at(split);
+    // Split off a trailing alphabetic unit suffix, leaving the numeric prefix.
+    // Scanning from the end keeps scientific notation (e.g. "1e6") in the number.
+    let unit_len = s
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .count();
+    let (num, unit) = s.split_at(s.len() - unit_len);
     let value: f64 = num
         .trim()
         .parse()
@@ -145,6 +157,15 @@ pub fn collect(root: &Path, opts: &Options) -> Result<Vec<Entry>> {
             continue;
         }
         let path = dent.path();
+        if let Some(skip) = &opts.skip_path {
+            // Cheap pre-filter on the file name, then confirm via canonicalize
+            // (the walker yields root-joined, not canonicalized, paths).
+            if dent.file_name() == skip.file_name().unwrap_or_default()
+                && path.canonicalize().ok().as_deref() == Some(skip.as_path())
+            {
+                continue;
+            }
+        }
         let rel = match path.strip_prefix(root) {
             Ok(r) => r,
             Err(_) => path,
@@ -166,7 +187,13 @@ pub fn collect(root: &Path, opts: &Options) -> Result<Vec<Entry>> {
 
         let meta = match dent.metadata() {
             Ok(m) => m,
-            Err(_) => continue,
+            Err(_) => {
+                entries.push(Entry {
+                    rel_path,
+                    kind: EntryKind::Unreadable,
+                });
+                continue;
+            }
         };
         if meta.len() > opts.max_size {
             entries.push(Entry {
@@ -178,7 +205,13 @@ pub fn collect(root: &Path, opts: &Options) -> Result<Vec<Entry>> {
 
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
-            Err(_) => continue,
+            Err(_) => {
+                entries.push(Entry {
+                    rel_path,
+                    kind: EntryKind::Unreadable,
+                });
+                continue;
+            }
         };
         let kind = if is_binary(&bytes) {
             EntryKind::Binary
@@ -253,6 +286,7 @@ fn entry_label(kind: &EntryKind) -> Option<String> {
         EntryKind::Text(_) => None,
         EntryKind::Binary => Some("(binary, omitted)".to_string()),
         EntryKind::TooLarge(n) => Some(format!("(skipped: {n} bytes > max)")),
+        EntryKind::Unreadable => Some("(unreadable, omitted)".to_string()),
     }
 }
 
@@ -292,13 +326,22 @@ fn render_tree(entries: &[Entry]) -> String {
 
     let mut out = String::new();
     walk(&root, 0, &mut out);
+    if out.is_empty() {
+        out.push_str("(empty)\n");
+    }
     out
 }
 
+/// Escape text content for XML (`&`, `<`, `>`).
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+/// Escape a value for an XML attribute (adds `"` and `'` to the content set).
+fn xml_attr_escape(s: &str) -> String {
+    xml_escape(s).replace('"', "&quot;").replace('\'', "&apos;")
 }
 
 /// Counts used in the summary line.
@@ -369,7 +412,13 @@ fn render_md(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) -> 
     for e in entries {
         if let EntryKind::Text(content) = &e.kind {
             let fence = fence_for(content);
-            out.push_str(&format!("### `{}`\n\n", e.rel_path));
+            // Wrap the path in inline code unless it contains a backtick, which
+            // inline code cannot represent; fall back to a plain heading then.
+            if e.rel_path.contains('`') {
+                out.push_str(&format!("### {}\n\n", e.rel_path));
+            } else {
+                out.push_str(&format!("### `{}`\n\n", e.rel_path));
+            }
             out.push_str(&format!("{fence}{}\n", lang_for_path(&e.rel_path)));
             out.push_str(content);
             if !content.ends_with('\n') {
@@ -383,7 +432,10 @@ fn render_md(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) -> 
 
 fn render_xml(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) -> String {
     let mut out = String::new();
-    out.push_str(&format!("<repotome path=\"{}\">\n", xml_escape(root_name)));
+    out.push_str(&format!(
+        "<repotome path=\"{}\">\n",
+        xml_attr_escape(root_name)
+    ));
 
     out.push_str("  <summary>\n");
     for line in summary_lines(st, opts) {
@@ -402,7 +454,10 @@ fn render_xml(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) ->
 
     for e in entries {
         if let EntryKind::Text(content) = &e.kind {
-            out.push_str(&format!("  <file path=\"{}\">\n", xml_escape(&e.rel_path)));
+            out.push_str(&format!(
+                "  <file path=\"{}\">\n",
+                xml_attr_escape(&e.rel_path)
+            ));
             out.push_str(&xml_escape(content));
             if !content.ends_with('\n') {
                 out.push('\n');
@@ -424,8 +479,26 @@ mod tests {
         assert_eq!(parse_size("1MiB").unwrap(), 1_048_576);
         assert_eq!(parse_size("500k").unwrap(), 500_000);
         assert_eq!(parse_size("2MB").unwrap(), 2_000_000);
+        assert_eq!(parse_size("1.5MiB").unwrap(), 1_572_864);
+        // Scientific notation stays in the numeric part (no false unit split).
+        assert_eq!(parse_size("1e6").unwrap(), 1_000_000);
         assert!(parse_size("abc").is_err());
         assert!(parse_size("1XB").is_err());
+    }
+
+    #[test]
+    fn xml_attribute_escaping_handles_quotes() {
+        let entries = vec![Entry {
+            rel_path: "we\"ird'.txt".to_string(),
+            kind: EntryKind::Text("hi\n".to_string()),
+        }];
+        let opts = Options {
+            format: Format::Xml,
+            ..Options::default()
+        };
+        let out = render("proj", &entries, &opts);
+        assert!(out.contains("path=\"we&quot;ird&apos;.txt\""));
+        assert!(!out.contains("path=\"we\"ird"));
     }
 
     #[test]

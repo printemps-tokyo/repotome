@@ -90,7 +90,11 @@ stderr, so piping stdout stays clean.
   git repository; the `.git` directory is always skipped. Use `--no-gitignore`
   to disable, `--hidden` to include dotfiles.
 - A file is treated as binary if it contains a NUL byte or is not valid UTF-8;
-  such files are listed in the tree but their contents are omitted.
+  such files are listed in the tree but their contents are omitted. Files that
+  cannot be read (permissions, etc.) are listed as `(unreadable, omitted)`.
+- `--include` / `--exclude` globs match against the repo-relative path, and `*`
+  spans `/` (so `--include '*.rs'` matches Rust files at any depth). The
+  `--output` file is skipped automatically when it lives inside the target.
 - The token count is a rough heuristic (about 4 characters per token), not a
   tokenizer — treat it as a ballpark.
 - Markdown output picks a code fence longer than any run of backticks inside a
