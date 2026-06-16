@@ -62,6 +62,19 @@ fn packs_a_directory_respecting_rules() {
 }
 
 #[test]
+fn repotomeignore_excludes_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("keep.rs"), "fn keep() {}\n").unwrap();
+    fs::write(root.join("drop.rs"), "fn drop() {}\n").unwrap();
+    fs::write(root.join(".repotomeignore"), "drop.rs\n").unwrap();
+
+    let entries = collect(root, &Options::default()).unwrap();
+    assert!(find(&entries, "keep.rs").is_some());
+    assert!(find(&entries, "drop.rs").is_none());
+}
+
+#[test]
 fn include_glob_filters() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

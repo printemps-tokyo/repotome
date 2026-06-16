@@ -149,6 +149,8 @@ pub fn collect(root: &Path, opts: &Options) -> Result<Vec<Entry>> {
         .parents(opts.respect_gitignore)
         // Honor .gitignore even when the target is not inside a git repo.
         .require_git(false)
+        // A repotome-specific ignore file, always honored (gitignore syntax).
+        .add_custom_ignore_filename(".repotomeignore")
         .filter_entry(|e| e.file_name() != ".git");
 
     let mut entries = Vec::new();

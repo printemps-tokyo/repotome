@@ -94,6 +94,9 @@ stderr, so piping stdout stays clean.
 - `.gitignore` (and `.ignore`) are honored even when the target is not inside a
   git repository; the `.git` directory is always skipped. Use `--no-gitignore`
   to disable, `--hidden` to include dotfiles.
+- A `.repotomeignore` file (same syntax as `.gitignore`) is always honored, for
+  excludes you want only when packing — e.g. lockfiles, fixtures, or generated
+  code that bloats the context.
 - A file is treated as binary if it contains a NUL byte or is not valid UTF-8;
   such files are listed in the tree but their contents are omitted. Files that
   cannot be read (permissions, etc.) are listed as `(unreadable, omitted)`.
