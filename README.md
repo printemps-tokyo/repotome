@@ -82,6 +82,7 @@ stderr, so piping stdout stays clean.
 | `--hidden` | Include hidden files (dotfiles) |
 | `--no-tree` | Omit the directory-tree section |
 | `--no-contents` | Omit file bodies; produce only the summary and tree |
+| `--paths` | Output just the collected file paths, one per line |
 | `--copy` | Copy the output to the system clipboard |
 | `--format <md\|xml>` | Output format (default `md`) |
 | `--tokens` | Include an approximate token count in the summary |

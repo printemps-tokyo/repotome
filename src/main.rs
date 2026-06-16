@@ -48,6 +48,10 @@ struct Cli {
     #[arg(long)]
     no_contents: bool,
 
+    /// Output just the collected file paths, one per line.
+    #[arg(long)]
+    paths: bool,
+
     /// Copy the output to the system clipboard (in addition to stdout/--output).
     #[arg(long)]
     copy: bool,
@@ -76,6 +80,7 @@ fn main() -> Result<()> {
         hidden: cli.hidden,
         tree: !cli.no_tree,
         contents: !cli.no_contents,
+        paths: cli.paths,
         format: if cli.format == "xml" {
             Format::Xml
         } else {

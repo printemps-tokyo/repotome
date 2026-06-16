@@ -38,6 +38,8 @@ pub struct Options {
     /// Render each file's contents. When false, only the summary and tree are
     /// produced (a quick map of the repo without the bodies).
     pub contents: bool,
+    /// Output just the collected file paths, one per line (overrides format).
+    pub paths: bool,
     /// Output format.
     pub format: Format,
     /// Include an approximate token count in the summary.
@@ -60,6 +62,7 @@ impl Default for Options {
             hidden: false,
             tree: true,
             contents: true,
+            paths: false,
             format: Format::Md,
             tokens: false,
             max_tokens: None,
@@ -429,11 +432,24 @@ pub fn stats(entries: &[Entry]) -> Stats {
 
 /// Render the collected entries into the final document string.
 pub fn render(root_name: &str, entries: &[Entry], opts: &Options) -> String {
+    if opts.paths {
+        return render_paths(entries);
+    }
     let st = stats(entries);
     match opts.format {
         Format::Md => render_md(root_name, entries, opts, &st),
         Format::Xml => render_xml(root_name, entries, opts, &st),
     }
+}
+
+/// Render just the collected file paths, one per line (already sorted).
+fn render_paths(entries: &[Entry]) -> String {
+    let mut out = String::new();
+    for e in entries {
+        out.push_str(&e.rel_path);
+        out.push('\n');
+    }
+    out
 }
 
 fn summary_lines(st: &Stats, opts: &Options) -> Vec<String> {
@@ -633,6 +649,26 @@ mod tests {
         assert!(out.contains("img.png  (binary, omitted)"));
         // Binary file has no content block.
         assert!(!out.contains("### `img.png`"));
+    }
+
+    #[test]
+    fn paths_mode_lists_only_paths() {
+        let entries = vec![
+            Entry {
+                rel_path: "src/a.rs".into(),
+                kind: EntryKind::Text("x\n".into()),
+            },
+            Entry {
+                rel_path: "logo.png".into(),
+                kind: EntryKind::Binary,
+            },
+        ];
+        let opts = Options {
+            paths: true,
+            ..Options::default()
+        };
+        let out = render("demo", &entries, &opts);
+        assert_eq!(out, "src/a.rs\nlogo.png\n");
     }
 
     #[test]
