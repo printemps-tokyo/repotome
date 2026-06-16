@@ -35,6 +35,9 @@ pub struct Options {
     pub hidden: bool,
     /// Render the directory-tree section.
     pub tree: bool,
+    /// Render each file's contents. When false, only the summary and tree are
+    /// produced (a quick map of the repo without the bodies).
+    pub contents: bool,
     /// Output format.
     pub format: Format,
     /// Include an approximate token count in the summary.
@@ -53,6 +56,7 @@ impl Default for Options {
             respect_gitignore: true,
             hidden: false,
             tree: true,
+            contents: true,
             format: Format::Md,
             tokens: false,
             skip_path: None,
@@ -408,6 +412,10 @@ fn render_md(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) -> 
         out.push_str("```\n\n");
     }
 
+    if !opts.contents {
+        return out;
+    }
+
     out.push_str("## Files\n\n");
     for e in entries {
         if let EntryKind::Text(content) = &e.kind {
@@ -450,6 +458,11 @@ fn render_xml(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) ->
         out.push_str("  <structure>\n");
         out.push_str(&xml_escape(&render_tree(entries)));
         out.push_str("  </structure>\n");
+    }
+
+    if !opts.contents {
+        out.push_str("</repotome>\n");
+        return out;
     }
 
     for e in entries {
@@ -542,5 +555,35 @@ mod tests {
         assert!(out.contains("img.png  (binary, omitted)"));
         // Binary file has no content block.
         assert!(!out.contains("### `img.png`"));
+    }
+
+    #[test]
+    fn no_contents_omits_file_bodies_but_keeps_tree() {
+        let entries = vec![Entry {
+            rel_path: "a.rs".to_string(),
+            kind: EntryKind::Text("fn main() {}\n".to_string()),
+        }];
+        let opts = Options {
+            contents: false,
+            ..Options::default()
+        };
+        let md = render("demo", &entries, &opts);
+        assert!(md.contains("## Structure"));
+        assert!(md.contains("a.rs"));
+        assert!(!md.contains("## Files"));
+        assert!(!md.contains("fn main() {}"));
+
+        let xml = render(
+            "demo",
+            &entries,
+            &Options {
+                format: Format::Xml,
+                contents: false,
+                ..Options::default()
+            },
+        );
+        assert!(xml.contains("<structure>"));
+        assert!(!xml.contains("<file "));
+        assert!(xml.trim_end().ends_with("</repotome>"));
     }
 }

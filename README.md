@@ -81,8 +81,13 @@ stderr, so piping stdout stays clean.
 | `--no-gitignore` | Do not respect `.gitignore` / `.ignore` |
 | `--hidden` | Include hidden files (dotfiles) |
 | `--no-tree` | Omit the directory-tree section |
+| `--no-contents` | Omit file bodies; produce only the summary and tree |
+| `--copy` | Copy the output to the system clipboard |
 | `--format <md\|xml>` | Output format (default `md`) |
 | `--tokens` | Include an approximate token count in the summary |
+
+`--copy` uses `pbcopy` (macOS), `wl-copy` / `xclip` (Linux), or `clip`
+(Windows); with `--copy` and no `--output`, stdout is suppressed.
 
 ## Notes
 

@@ -44,6 +44,14 @@ struct Cli {
     #[arg(long)]
     no_tree: bool,
 
+    /// Omit file contents; produce only the summary and directory tree.
+    #[arg(long)]
+    no_contents: bool,
+
+    /// Copy the output to the system clipboard (in addition to stdout/--output).
+    #[arg(long)]
+    copy: bool,
+
     /// Output format.
     #[arg(long, value_parser = ["md", "xml"], default_value = "md")]
     format: String,
@@ -63,6 +71,7 @@ fn main() -> Result<()> {
         respect_gitignore: !cli.no_gitignore,
         hidden: cli.hidden,
         tree: !cli.no_tree,
+        contents: !cli.no_contents,
         format: if cli.format == "xml" {
             Format::Xml
         } else {
@@ -86,14 +95,20 @@ fn main() -> Result<()> {
     let entries = collect(&cli.path, &opts).context("failed to walk the directory")?;
     let document = render(&root_name, &entries, &opts);
 
+    if cli.copy {
+        copy_to_clipboard(&document).context("failed to copy to clipboard")?;
+        eprintln!("repotome: copied {} bytes to clipboard", document.len());
+    }
+
     match &cli.output {
         Some(path) => {
             std::fs::write(path, &document)
                 .with_context(|| format!("failed to write {}", path.display()))?;
         }
-        None => {
+        None if !cli.copy => {
             std::io::stdout().write_all(document.as_bytes())?;
         }
+        None => {}
     }
 
     let st = stats(&entries);
@@ -109,4 +124,38 @@ fn main() -> Result<()> {
         }
     );
     Ok(())
+}
+
+/// Copy `text` to the system clipboard using whichever helper is available
+/// (pbcopy on macOS, wl-copy / xclip on Linux, clip on Windows).
+fn copy_to_clipboard(text: &str) -> Result<()> {
+    use std::process::{Command, Stdio};
+
+    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbcopy", &[])]
+    } else if cfg!(target_os = "windows") {
+        &[("clip", &[])]
+    } else {
+        &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"])]
+    };
+
+    let mut last_err = anyhow::anyhow!("no clipboard helper found");
+    for (bin, args) in candidates {
+        match Command::new(bin).args(*args).stdin(Stdio::piped()).spawn() {
+            Ok(mut child) => {
+                child
+                    .stdin
+                    .take()
+                    .context("clipboard helper has no stdin")?
+                    .write_all(text.as_bytes())?;
+                let status = child.wait()?;
+                if status.success() {
+                    return Ok(());
+                }
+                last_err = anyhow::anyhow!("{bin} exited with {status}");
+            }
+            Err(e) => last_err = anyhow::anyhow!("could not run {bin}: {e}"),
+        }
+    }
+    Err(last_err)
 }
