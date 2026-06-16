@@ -291,9 +291,13 @@ pub fn fence_for(content: &str) -> String {
     "`".repeat(max_run.max(2) + 1)
 }
 
-fn entry_label(kind: &EntryKind) -> Option<String> {
+/// Tree label for an entry. With `show_tokens`, text files show their
+/// approximate token count (e.g. "~120t"); other kinds keep their status note.
+fn entry_label(kind: &EntryKind, show_tokens: bool) -> Option<String> {
     match kind {
-        EntryKind::Text(_) => None,
+        EntryKind::Text(content) => {
+            show_tokens.then(|| format!("~{}t", approx_tokens(content.chars().count())))
+        }
         EntryKind::Binary => Some("(binary, omitted)".to_string()),
         EntryKind::TooLarge(n) => Some(format!("(skipped: {n} bytes > max)")),
         EntryKind::Unreadable => Some("(unreadable, omitted)".to_string()),
@@ -301,7 +305,7 @@ fn entry_label(kind: &EntryKind) -> Option<String> {
 }
 
 /// Render an indented directory tree from the collected entries.
-fn render_tree(entries: &[Entry]) -> String {
+fn render_tree(entries: &[Entry], show_tokens: bool) -> String {
     // Nested map: directory name -> subtree; files carry an optional label.
     #[derive(Default)]
     struct Node {
@@ -316,7 +320,8 @@ fn render_tree(entries: &[Entry]) -> String {
             node = node.dirs.entry((*dir).to_string()).or_default();
         }
         if let Some(name) = parts.last() {
-            node.files.insert((*name).to_string(), entry_label(&e.kind));
+            node.files
+                .insert((*name).to_string(), entry_label(&e.kind, show_tokens));
         }
     }
 
@@ -457,7 +462,7 @@ fn render_md(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) -> 
 
     if opts.tree {
         out.push_str("## Structure\n\n```\n");
-        out.push_str(&render_tree(entries));
+        out.push_str(&render_tree(entries, opts.tokens));
         out.push_str("```\n\n");
     }
 
@@ -517,7 +522,7 @@ fn render_xml(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) ->
 
     if opts.tree {
         out.push_str("  <structure>\n");
-        out.push_str(&xml_escape(&render_tree(entries)));
+        out.push_str(&xml_escape(&render_tree(entries, opts.tokens)));
         out.push_str("  </structure>\n");
     }
 
@@ -628,6 +633,25 @@ mod tests {
         assert!(out.contains("img.png  (binary, omitted)"));
         // Binary file has no content block.
         assert!(!out.contains("### `img.png`"));
+    }
+
+    #[test]
+    fn tree_shows_per_file_tokens_when_enabled() {
+        let entries = vec![Entry {
+            rel_path: "a.rs".into(),
+            kind: EntryKind::Text("aaaaaaaa\n".into()), // 9 chars -> ceil(9/4)=3 tokens
+        }];
+        // Without --tokens: no per-file annotation.
+        let plain = render("demo", &entries, &Options::default());
+        assert!(plain.contains("a.rs\n"));
+        assert!(!plain.contains("~3t"));
+        // With --tokens: the tree annotates the file.
+        let opts = Options {
+            tokens: true,
+            ..Options::default()
+        };
+        let withtok = render("demo", &entries, &opts);
+        assert!(withtok.contains("a.rs  ~3t"));
     }
 
     #[test]
