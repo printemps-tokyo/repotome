@@ -42,6 +42,9 @@ pub struct Options {
     pub format: Format,
     /// Include an approximate token count in the summary.
     pub tokens: bool,
+    /// Stop emitting file bodies once the running approximate token count would
+    /// exceed this budget (the first file is always included).
+    pub max_tokens: Option<usize>,
     /// Absolute path to skip during the walk (e.g. the --output file when it
     /// lives inside the target directory, so a previous run is not re-packed).
     pub skip_path: Option<std::path::PathBuf>,
@@ -59,6 +62,7 @@ impl Default for Options {
             contents: true,
             format: Format::Md,
             tokens: false,
+            max_tokens: None,
             skip_path: None,
         }
     }
@@ -350,6 +354,49 @@ fn xml_attr_escape(s: &str) -> String {
     xml_escape(s).replace('"', "&quot;").replace('\'', "&apos;")
 }
 
+/// How many leading text files fit a token budget, and how many are dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetPlan {
+    /// Number of text files (in order) whose bodies are included.
+    pub included: usize,
+    /// Number of text files whose bodies are omitted for the budget.
+    pub omitted: usize,
+}
+
+/// Decide which text files fit `max_tokens` (entries are consumed in order).
+/// The first text file is always included; once a file would exceed the budget,
+/// it and every later text file are omitted.
+pub fn plan_budget(entries: &[Entry], max_tokens: Option<usize>) -> BudgetPlan {
+    let text_total = entries
+        .iter()
+        .filter(|e| matches!(e.kind, EntryKind::Text(_)))
+        .count();
+    let Some(budget) = max_tokens else {
+        return BudgetPlan {
+            included: text_total,
+            omitted: 0,
+        };
+    };
+
+    let mut used = 0usize;
+    let mut included = 0usize;
+    for e in entries {
+        if let EntryKind::Text(content) = &e.kind {
+            let cost = approx_tokens(content.chars().count());
+            if included == 0 || used + cost <= budget {
+                used += cost;
+                included += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    BudgetPlan {
+        included,
+        omitted: text_total - included,
+    }
+}
+
 /// Counts used in the summary line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Stats {
@@ -418,9 +465,15 @@ fn render_md(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) -> 
         return out;
     }
 
+    let plan = plan_budget(entries, opts.max_tokens);
     out.push_str("## Files\n\n");
+    let mut emitted = 0usize;
     for e in entries {
         if let EntryKind::Text(content) = &e.kind {
+            if emitted >= plan.included {
+                break;
+            }
+            emitted += 1;
             let fence = fence_for(content);
             // Wrap the path in inline code unless it contains a backtick, which
             // inline code cannot represent; fall back to a plain heading then.
@@ -436,6 +489,12 @@ fn render_md(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) -> 
             }
             out.push_str(&format!("{fence}\n\n"));
         }
+    }
+    if plan.omitted > 0 {
+        out.push_str(&format!(
+            "_{} more file(s) omitted (token budget)_\n",
+            plan.omitted
+        ));
     }
     out
 }
@@ -467,8 +526,14 @@ fn render_xml(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) ->
         return out;
     }
 
+    let plan = plan_budget(entries, opts.max_tokens);
+    let mut emitted = 0usize;
     for e in entries {
         if let EntryKind::Text(content) = &e.kind {
+            if emitted >= plan.included {
+                break;
+            }
+            emitted += 1;
             out.push_str(&format!(
                 "  <file path=\"{}\">\n",
                 xml_attr_escape(&e.rel_path)
@@ -479,6 +544,12 @@ fn render_xml(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) ->
             }
             out.push_str("  </file>\n");
         }
+    }
+    if plan.omitted > 0 {
+        out.push_str(&format!(
+            "  <omitted reason=\"token-budget\">{}</omitted>\n",
+            plan.omitted
+        ));
     }
     out.push_str("</repotome>\n");
     out
@@ -557,6 +628,78 @@ mod tests {
         assert!(out.contains("img.png  (binary, omitted)"));
         // Binary file has no content block.
         assert!(!out.contains("### `img.png`"));
+    }
+
+    #[test]
+    fn plan_budget_includes_until_the_cap() {
+        // Each file is ~5 chars -> ceil(5/4) = 2 tokens.
+        let entries = vec![
+            Entry {
+                rel_path: "a".into(),
+                kind: EntryKind::Text("aaaa\n".into()),
+            },
+            Entry {
+                rel_path: "b".into(),
+                kind: EntryKind::Text("bbbb\n".into()),
+            },
+            Entry {
+                rel_path: "c".into(),
+                kind: EntryKind::Text("cccc\n".into()),
+            },
+        ];
+        assert_eq!(
+            plan_budget(&entries, None),
+            BudgetPlan {
+                included: 3,
+                omitted: 0
+            }
+        );
+        // Budget 3 tokens: first file (2) fits; second would make 4 > 3 -> stop.
+        assert_eq!(
+            plan_budget(&entries, Some(3)),
+            BudgetPlan {
+                included: 1,
+                omitted: 2
+            }
+        );
+        // Budget 4 tokens: two files fit (2+2), third omitted.
+        assert_eq!(
+            plan_budget(&entries, Some(4)),
+            BudgetPlan {
+                included: 2,
+                omitted: 1
+            }
+        );
+        // The first file is always included even if it alone exceeds the budget.
+        assert_eq!(
+            plan_budget(&entries, Some(1)),
+            BudgetPlan {
+                included: 1,
+                omitted: 2
+            }
+        );
+    }
+
+    #[test]
+    fn render_md_truncates_at_token_budget() {
+        let entries = vec![
+            Entry {
+                rel_path: "a.txt".into(),
+                kind: EntryKind::Text("aaaa\n".into()),
+            },
+            Entry {
+                rel_path: "b.txt".into(),
+                kind: EntryKind::Text("bbbb\n".into()),
+            },
+        ];
+        let opts = Options {
+            max_tokens: Some(2),
+            ..Options::default()
+        };
+        let out = render("demo", &entries, &opts);
+        assert!(out.contains("### `a.txt`"));
+        assert!(!out.contains("### `b.txt`"));
+        assert!(out.contains("1 more file(s) omitted (token budget)"));
     }
 
     #[test]

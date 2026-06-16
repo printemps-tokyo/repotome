@@ -85,6 +85,7 @@ stderr, so piping stdout stays clean.
 | `--copy` | Copy the output to the system clipboard |
 | `--format <md\|xml>` | Output format (default `md`) |
 | `--tokens` | Include an approximate token count in the summary |
+| `--max-tokens <n>` | Stop emitting file bodies once this token budget is reached |
 
 `--copy` uses `pbcopy` (macOS), `wl-copy` / `xclip` (Linux), or `clip`
 (Windows); with `--copy` and no `--output`, stdout is suppressed.
@@ -104,7 +105,9 @@ stderr, so piping stdout stays clean.
   spans `/` (so `--include '*.rs'` matches Rust files at any depth). The
   `--output` file is skipped automatically when it lives inside the target.
 - The token count is a rough heuristic (about 4 characters per token), not a
-  tokenizer — treat it as a ballpark.
+  tokenizer — treat it as a ballpark. `--max-tokens` uses the same estimate: it
+  emits whole files in order until the budget is reached (the first file is
+  always included), then notes how many were omitted.
 - Markdown output picks a code fence longer than any run of backticks inside a
   file, so files that themselves contain fences are embedded safely.
 

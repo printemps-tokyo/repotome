@@ -59,6 +59,10 @@ struct Cli {
     /// Include an approximate token count in the summary.
     #[arg(long)]
     tokens: bool,
+
+    /// Stop emitting file bodies once this approximate token budget is reached.
+    #[arg(long)]
+    max_tokens: Option<usize>,
 }
 
 fn main() -> Result<()> {
@@ -78,6 +82,7 @@ fn main() -> Result<()> {
             Format::Md
         },
         tokens: cli.tokens,
+        max_tokens: cli.max_tokens,
         // Don't re-pack the output file if it lives inside the target directory.
         skip_path: cli.output.as_ref().and_then(|p| p.canonicalize().ok()),
     };
