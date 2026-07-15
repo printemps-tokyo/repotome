@@ -46,6 +46,7 @@ Example output (Markdown):
 - Files: 2 text, 1 skipped
 - Text size: 412 bytes
 - Approx tokens: ~103
+- Top files: src/main.rs ~89t, README.md ~14t
 
 ## Structure
 
@@ -106,8 +107,8 @@ stderr, so piping stdout stays clean.
   spans `/` (so `--include '*.rs'` matches Rust files at any depth). The
   `--output` file is skipped automatically when it lives inside the target.
 - With `--tokens`, the directory tree also annotates each text file with its
-  approximate token count (e.g. `main.rs  ~120t`) so you can see what consumes
-  the budget.
+  approximate token count (e.g. `main.rs  ~120t`), and the summary lists the
+  top 5 files by estimated tokens so you can see what to `--exclude`.
 - The token count is a rough heuristic (about 4 characters per token), not a
   tokenizer — treat it as a ballpark. `--max-tokens` uses the same estimate: it
   emits whole files in order until the budget is reached (the first file is

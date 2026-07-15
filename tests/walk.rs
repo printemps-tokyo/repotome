@@ -75,6 +75,28 @@ fn repotomeignore_excludes_files() {
 }
 
 #[test]
+fn summary_names_top_token_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/big.rs"), "b".repeat(400)).unwrap(); // 100 tokens
+    fs::write(root.join("src/gen.rs"), "g".repeat(120)).unwrap(); // 30 tokens
+    fs::write(root.join("note.txt"), "n".repeat(40)).unwrap(); // 10 tokens
+
+    let opts = Options {
+        tokens: true,
+        ..Options::default()
+    };
+    let entries = collect(root, &opts).unwrap();
+    let doc = render("proj", &entries, &opts);
+    assert!(doc.contains("- Top files: src/big.rs ~100t, src/gen.rs ~30t, note.txt ~10t"));
+
+    // Without --tokens the summary keeps its original shape.
+    let plain = render("proj", &entries, &Options::default());
+    assert!(!plain.contains("Top files:"));
+}
+
+#[test]
 fn include_glob_filters() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

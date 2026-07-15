@@ -452,7 +452,28 @@ fn render_paths(entries: &[Entry]) -> String {
     out
 }
 
-fn summary_lines(st: &Stats, opts: &Options) -> Vec<String> {
+/// How many top token-consuming files the summary lists.
+const TOP_FILES: usize = 5;
+
+/// The top `n` text files by estimated token count, largest first.
+/// Ties are broken by path so the ordering is deterministic; fewer than
+/// `n` text files simply yields a shorter list.
+pub fn top_token_files(entries: &[Entry], n: usize) -> Vec<(&str, usize)> {
+    let mut files: Vec<(&str, usize)> = entries
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EntryKind::Text(content) => {
+                Some((e.rel_path.as_str(), approx_tokens(content.chars().count())))
+            }
+            _ => None,
+        })
+        .collect();
+    files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    files.truncate(n);
+    files
+}
+
+fn summary_lines(entries: &[Entry], st: &Stats, opts: &Options) -> Vec<String> {
     let mut lines = vec![
         format!(
             "- Files: {} text, {} skipped",
@@ -462,6 +483,14 @@ fn summary_lines(st: &Stats, opts: &Options) -> Vec<String> {
     ];
     if opts.tokens {
         lines.push(format!("- Approx tokens: ~{}", approx_tokens(st.chars)));
+        let top = top_token_files(entries, TOP_FILES);
+        if !top.is_empty() {
+            let list: Vec<String> = top
+                .iter()
+                .map(|(path, tokens)| format!("{path} ~{tokens}t"))
+                .collect();
+            lines.push(format!("- Top files: {}", list.join(", ")));
+        }
     }
     lines
 }
@@ -470,7 +499,7 @@ fn render_md(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) -> 
     let mut out = String::new();
     out.push_str(&format!("# Repository: {root_name}\n\n"));
     out.push_str("## Summary\n\n");
-    for line in summary_lines(st, opts) {
+    for line in summary_lines(entries, st, opts) {
         out.push_str(&line);
         out.push('\n');
     }
@@ -528,7 +557,7 @@ fn render_xml(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) ->
     ));
 
     out.push_str("  <summary>\n");
-    for line in summary_lines(st, opts) {
+    for line in summary_lines(entries, st, opts) {
         out.push_str(&format!(
             "    {}\n",
             xml_escape(line.trim_start_matches("- "))
@@ -790,5 +819,92 @@ mod tests {
         assert!(xml.contains("<structure>"));
         assert!(!xml.contains("<file "));
         assert!(xml.trim_end().ends_with("</repotome>"));
+    }
+
+    fn text_entry(path: &str, chars: usize) -> Entry {
+        Entry {
+            rel_path: path.to_string(),
+            kind: EntryKind::Text("x".repeat(chars)),
+        }
+    }
+
+    #[test]
+    fn top_token_files_orders_ties_and_truncates() {
+        let entries = vec![
+            text_entry("small.rs", 4),   // 1 token
+            text_entry("big.rs", 40),    // 10 tokens
+            text_entry("mid_b.rs", 20),  // 5 tokens (tie)
+            text_entry("mid_a.rs", 20),  // 5 tokens (tie)
+            text_entry("large.rs", 32),  // 8 tokens
+            text_entry("medium.rs", 24), // 6 tokens
+            Entry {
+                rel_path: "logo.png".to_string(),
+                kind: EntryKind::Binary,
+            },
+        ];
+        // Largest first; ties broken by path; capped at n; non-text ignored.
+        assert_eq!(
+            top_token_files(&entries, 5),
+            vec![
+                ("big.rs", 10),
+                ("large.rs", 8),
+                ("medium.rs", 6),
+                ("mid_a.rs", 5),
+                ("mid_b.rs", 5),
+            ]
+        );
+        // Fewer text files than requested yields a shorter list.
+        assert_eq!(
+            top_token_files(&entries[..2], 5),
+            vec![("big.rs", 10), ("small.rs", 1)]
+        );
+        assert!(top_token_files(&[], 5).is_empty());
+    }
+
+    #[test]
+    fn summary_lists_top_files_when_tokens_enabled() {
+        let entries = vec![
+            text_entry("src/gen.rs", 12), // 3 tokens
+            text_entry("src/big.rs", 20), // 5 tokens
+            text_entry("tiny.txt", 4),    // 1 token
+        ];
+        let opts = Options {
+            tokens: true,
+            ..Options::default()
+        };
+        let md = render("demo", &entries, &opts);
+        assert!(md.contains("- Top files: src/big.rs ~5t, src/gen.rs ~3t, tiny.txt ~1t\n"));
+
+        let xml = render(
+            "demo",
+            &entries,
+            &Options {
+                format: Format::Xml,
+                tokens: true,
+                ..Options::default()
+            },
+        );
+        assert!(xml.contains("    Top files: src/big.rs ~5t, src/gen.rs ~3t, tiny.txt ~1t\n"));
+    }
+
+    #[test]
+    fn summary_omits_top_files_without_tokens_or_text() {
+        let entries = vec![text_entry("a.rs", 8)];
+        // --tokens off: no top-files line.
+        let md = render("demo", &entries, &Options::default());
+        assert!(!md.contains("Top files:"));
+
+        // --tokens on but no text files: line is skipped, not rendered empty.
+        let binary_only = vec![Entry {
+            rel_path: "logo.png".to_string(),
+            kind: EntryKind::Binary,
+        }];
+        let opts = Options {
+            tokens: true,
+            ..Options::default()
+        };
+        let md = render("demo", &binary_only, &opts);
+        assert!(md.contains("- Approx tokens: ~0"));
+        assert!(!md.contains("Top files:"));
     }
 }
