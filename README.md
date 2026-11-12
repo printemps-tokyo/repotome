@@ -34,6 +34,8 @@ repotome . -o context.md       # write to a file
 repotome . --include '*.rs' --include '*.toml'
 repotome . --exclude 'target/**' --max-size 256k
 repotome . --format xml        # repomix-style XML wrapper
+repotome . --exclude-preset auto            # drop lock files and build output
+repotome . --split-tokens 100000 -o ctx.md  # ctx-1.md, ctx-2.md, ... of ~100k tokens
 ```
 
 Example output (Markdown):
@@ -88,6 +90,8 @@ stderr, so piping stdout stays clean.
 | `--format <md\|xml>` | Output format (default `md`) |
 | `--tokens` | Include an approximate token count in the summary |
 | `--max-tokens <n>` | Stop emitting file bodies once this token budget is reached |
+| `--split-tokens <n>` | Split into parts of about `n` tokens of file bodies each, written as `NAME-1.EXT`, `NAME-2.EXT`, ... next to `--output` (needs `--output`) |
+| `--exclude-preset <name>` | Exclude a language's lock files, dependencies and build output: `node`, `python`, `rust`, `go`, `php`, `ruby`, `java`, or `auto` (repeatable or comma-separated) |
 
 `--copy` uses `pbcopy` (macOS), `wl-copy` / `xclip` (Linux), or `clip`
 (Windows); with `--copy` and no `--output`, stdout is suppressed.
@@ -95,8 +99,11 @@ stderr, so piping stdout stays clean.
 ## Notes
 
 - `.gitignore` (and `.ignore`) are honored even when the target is not inside a
-  git repository; the `.git` directory is always skipped. Use `--no-gitignore`
-  to disable, `--hidden` to include dotfiles.
+  git repository; the `.git` directory is always skipped. Inside a repository
+  they apply up to its root, as in git, so a repository nested in another one
+  (a submodule, or a folder of repositories whose own `.gitignore` ignores
+  everything) is packed by its own rules. Use `--no-gitignore` to disable,
+  `--hidden` to include dotfiles.
 - A `.repotomeignore` file (same syntax as `.gitignore`) is always honored, for
   excludes you want only when packing — e.g. lockfiles, fixtures, or generated
   code that bloats the context.
@@ -109,10 +116,23 @@ stderr, so piping stdout stays clean.
 - With `--tokens`, the directory tree also annotates each text file with its
   approximate token count (e.g. `main.rs  ~120t`), and the summary lists the
   top 5 files by estimated tokens so you can see what to `--exclude`.
-- The token count is a rough heuristic (about 4 characters per token), not a
-  tokenizer — treat it as a ballpark. `--max-tokens` uses the same estimate: it
-  emits whole files in order until the budget is reached (the first file is
-  always included), then notes how many were omitted.
+- The token count is a rough heuristic, not a tokenizer: about 4 ASCII
+  characters per token, and one token per other character (tokenizers split
+  Japanese and other non-ASCII text much finer than English). Treat it as a
+  ballpark. `--max-tokens` uses the same estimate: it emits whole files in
+  order until the budget is reached (the first file is always included), then
+  notes how many were omitted.
+- `--split-tokens` keeps files whole and in order: each part takes files until
+  the next one would pass the budget, and a file larger than the budget gets a
+  part of its own. Part 1 carries the summary and the tree of the whole
+  repository; each part's title says `part k of n`, and every part but the
+  last ends with a pointer to the next.
+- `--exclude-preset auto` picks the presets whose marker file is at the root
+  (`package.json`, `pyproject.toml` / `setup.py` / `setup.cfg` /
+  `requirements.txt`, `Cargo.toml`, `go.mod`, `composer.json`, `Gemfile`,
+  `pom.xml` / `build.gradle`). `node` excludes `node_modules/`, lock files,
+  `dist/`, `.next/`, `.nuxt/`, `.output/`, `coverage/`, `*.min.js`, `*.min.css`
+  and `*.map`; the full lists are in `src/lib.rs` (`EXCLUDE_PRESETS`).
 - Markdown output picks a code fence longer than any run of backticks inside a
   file, so files that themselves contain fences are embedded safely.
 

@@ -91,6 +91,131 @@ pub struct Entry {
     pub kind: EntryKind,
 }
 
+/// A language's lock files, dependency folders and build output: rarely
+/// useful to an LLM, and often most of the tokens.
+pub struct ExcludePreset {
+    pub name: &'static str,
+    /// Files at the root that show a project uses this language (for `auto`).
+    pub markers: &'static [&'static str],
+    /// Globs excluded, matched against repo-relative paths.
+    pub globs: &'static [&'static str],
+}
+
+pub const EXCLUDE_PRESETS: &[ExcludePreset] = &[
+    ExcludePreset {
+        name: "node",
+        markers: &["package.json"],
+        globs: &[
+            "**/node_modules/**",
+            "**/package-lock.json",
+            "**/npm-shrinkwrap.json",
+            "**/yarn.lock",
+            "**/pnpm-lock.yaml",
+            "**/bun.lock",
+            "**/bun.lockb",
+            "**/dist/**",
+            "**/.next/**",
+            "**/.nuxt/**",
+            "**/.output/**",
+            "**/coverage/**",
+            "**/*.min.js",
+            "**/*.min.css",
+            "**/*.map",
+        ],
+    },
+    ExcludePreset {
+        name: "python",
+        markers: &[
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "requirements.txt",
+        ],
+        globs: &[
+            "**/__pycache__/**",
+            "**/*.pyc",
+            "**/.venv/**",
+            "**/venv/**",
+            "**/.tox/**",
+            "**/.mypy_cache/**",
+            "**/.pytest_cache/**",
+            "**/.ruff_cache/**",
+            "**/*.egg-info/**",
+            "**/poetry.lock",
+            "**/uv.lock",
+            "**/Pipfile.lock",
+        ],
+    },
+    ExcludePreset {
+        name: "rust",
+        markers: &["Cargo.toml"],
+        globs: &["**/target/**", "**/Cargo.lock"],
+    },
+    ExcludePreset {
+        name: "go",
+        markers: &["go.mod"],
+        globs: &["**/vendor/**", "**/go.sum"],
+    },
+    ExcludePreset {
+        name: "php",
+        markers: &["composer.json"],
+        globs: &["**/vendor/**", "**/composer.lock"],
+    },
+    ExcludePreset {
+        name: "ruby",
+        markers: &["Gemfile"],
+        globs: &["**/vendor/bundle/**", "**/Gemfile.lock", "**/.bundle/**"],
+    },
+    ExcludePreset {
+        name: "java",
+        markers: &["pom.xml", "build.gradle", "build.gradle.kts"],
+        globs: &[
+            "**/target/**",
+            "**/build/**",
+            "**/.gradle/**",
+            "**/*.class",
+            "**/*.jar",
+        ],
+    },
+];
+
+/// The globs of the named presets. `auto` picks the presets whose marker
+/// files are at `root`. Unknown names are an error.
+pub fn preset_globs(names: &[String], root: &Path) -> Result<Vec<String>> {
+    let mut chosen: Vec<&ExcludePreset> = Vec::new();
+    for name in names {
+        if name == "auto" {
+            for p in EXCLUDE_PRESETS {
+                if p.markers.iter().any(|m| root.join(m).is_file())
+                    && !chosen.iter().any(|c| c.name == p.name)
+                {
+                    chosen.push(p);
+                }
+            }
+            continue;
+        }
+        let Some(p) = EXCLUDE_PRESETS.iter().find(|p| p.name == name) else {
+            let known: Vec<&str> = EXCLUDE_PRESETS.iter().map(|p| p.name).collect();
+            anyhow::bail!(
+                "unknown exclude preset {name:?} (known: {}, auto)",
+                known.join(", ")
+            );
+        };
+        if !chosen.iter().any(|c| c.name == p.name) {
+            chosen.push(p);
+        }
+    }
+    let mut globs: Vec<String> = Vec::new();
+    for p in chosen {
+        for g in p.globs {
+            if !globs.iter().any(|x| x == g) {
+                globs.push((*g).to_string());
+            }
+        }
+    }
+    Ok(globs)
+}
+
 /// Parse a human size string ("1MiB", "500k", "1048576") into bytes.
 /// Decimal units (MB) use 1000, binary units (MiB) use 1024.
 pub fn parse_size(input: &str) -> Result<u64> {
@@ -123,9 +248,28 @@ pub fn parse_size(input: &str) -> Result<u64> {
     Ok((value * mult) as u64)
 }
 
-/// A rough token estimate: about 4 characters per token.
+/// A rough token estimate from a character count: about 4 characters per
+/// token, which holds for English prose and code.
 pub fn approx_tokens(chars: usize) -> usize {
     chars.div_ceil(4)
+}
+
+/// A rough token estimate for a text: about 4 ASCII characters per token,
+/// and one token per other character. Tokenizers split Japanese, Chinese and
+/// other non-ASCII text far finer than English, so counting those at 4 per
+/// token would understate them several times. Still a heuristic: real
+/// counts depend on the model's tokenizer.
+pub fn estimate_tokens(text: &str) -> usize {
+    let mut ascii = 0usize;
+    let mut other = 0usize;
+    for c in text.chars() {
+        if c.is_ascii() {
+            ascii += 1;
+        } else {
+            other += 1;
+        }
+    }
+    ascii.div_ceil(4) + other
 }
 
 fn build_globset(patterns: &[String]) -> Result<Option<GlobSet>> {
@@ -154,8 +298,11 @@ pub fn collect(root: &Path, opts: &Options) -> Result<Vec<Entry>> {
         .git_exclude(opts.respect_gitignore)
         .ignore(opts.respect_gitignore)
         .parents(opts.respect_gitignore)
-        // Honor .gitignore even when the target is not inside a git repo.
-        .require_git(false)
+        // Inside a git repository, follow git: ignore files apply up to the
+        // repository's root and no further, so a repository nested in another
+        // (a workspace whose own .gitignore ignores everything, a submodule)
+        // is packed by its own rules. Outside one, still honor .gitignore.
+        .require_git(inside_git(root))
         // A repotome-specific ignore file, always honored (gitignore syntax).
         .add_custom_ignore_filename(".repotomeignore")
         .filter_entry(|e| e.file_name() != ".git");
@@ -241,6 +388,13 @@ pub fn collect(root: &Path, opts: &Options) -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
+/// Whether `root` is in a git working tree: it or a parent has `.git` (a
+/// directory, or a file as in worktrees and submodules).
+fn inside_git(root: &Path) -> bool {
+    let start = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    start.ancestors().any(|dir| dir.join(".git").exists())
+}
+
 fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF_BYTES).any(|&b| b == 0)
 }
@@ -298,9 +452,7 @@ pub fn fence_for(content: &str) -> String {
 /// approximate token count (e.g. "~120t"); other kinds keep their status note.
 fn entry_label(kind: &EntryKind, show_tokens: bool) -> Option<String> {
     match kind {
-        EntryKind::Text(content) => {
-            show_tokens.then(|| format!("~{}t", approx_tokens(content.chars().count())))
-        }
+        EntryKind::Text(content) => show_tokens.then(|| format!("~{}t", estimate_tokens(content))),
         EntryKind::Binary => Some("(binary, omitted)".to_string()),
         EntryKind::TooLarge(n) => Some(format!("(skipped: {n} bytes > max)")),
         EntryKind::Unreadable => Some("(unreadable, omitted)".to_string()),
@@ -390,7 +542,7 @@ pub fn plan_budget(entries: &[Entry], max_tokens: Option<usize>) -> BudgetPlan {
     let mut included = 0usize;
     for e in entries {
         if let EntryKind::Text(content) = &e.kind {
-            let cost = approx_tokens(content.chars().count());
+            let cost = estimate_tokens(content);
             if included == 0 || used + cost <= budget {
                 used += cost;
                 included += 1;
@@ -412,6 +564,8 @@ pub struct Stats {
     pub skipped_files: usize,
     pub text_bytes: usize,
     pub chars: usize,
+    /// Estimated tokens of all text bodies (see `estimate_tokens`).
+    pub tokens: usize,
 }
 
 /// Compute summary statistics over the entries.
@@ -423,11 +577,44 @@ pub fn stats(entries: &[Entry]) -> Stats {
                 s.text_files += 1;
                 s.text_bytes += t.len();
                 s.chars += t.chars().count();
+                s.tokens += estimate_tokens(t);
             }
             _ => s.skipped_files += 1,
         }
     }
     s
+}
+
+/// Which text bodies a document carries, and where it sits among parts.
+struct Body {
+    /// Per entry: whether its text body is emitted.
+    emit: Vec<bool>,
+    /// Text files left out for the token budget.
+    omitted: usize,
+    /// (this part, number of parts), 1-based, when split.
+    part: Option<(usize, usize)>,
+}
+
+impl Body {
+    /// The leading text files that fit `max_tokens` (the budget mode).
+    fn budget(entries: &[Entry], max_tokens: Option<usize>) -> Body {
+        let plan = plan_budget(entries, max_tokens);
+        let mut seen = 0usize;
+        let emit = entries
+            .iter()
+            .map(|e| {
+                matches!(e.kind, EntryKind::Text(_)) && {
+                    seen += 1;
+                    seen <= plan.included
+                }
+            })
+            .collect();
+        Body {
+            emit,
+            omitted: plan.omitted,
+            part: None,
+        }
+    }
 }
 
 /// Render the collected entries into the final document string.
@@ -436,10 +623,72 @@ pub fn render(root_name: &str, entries: &[Entry], opts: &Options) -> String {
         return render_paths(entries);
     }
     let st = stats(entries);
+    let body = Body::budget(entries, opts.max_tokens);
     match opts.format {
-        Format::Md => render_md(root_name, entries, opts, &st),
-        Format::Xml => render_xml(root_name, entries, opts, &st),
+        Format::Md => render_md(root_name, entries, opts, &st, &body),
+        Format::Xml => render_xml(root_name, entries, opts, &st, &body),
     }
+}
+
+/// Group the text files, in order, into parts of at most `max_tokens`
+/// estimated tokens each. A file larger than that gets a part to itself.
+/// Returns entry indices per part; an empty list when there is no text.
+pub fn split_parts(entries: &[Entry], max_tokens: usize) -> Vec<Vec<usize>> {
+    let mut parts: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0usize;
+    for (i, e) in entries.iter().enumerate() {
+        let EntryKind::Text(content) = &e.kind else {
+            continue;
+        };
+        let cost = estimate_tokens(content);
+        match parts.last_mut() {
+            Some(part) if used + cost <= max_tokens => {
+                part.push(i);
+                used += cost;
+            }
+            _ => {
+                parts.push(vec![i]);
+                used = cost;
+            }
+        }
+    }
+    parts
+}
+
+/// Render the entries as several documents of at most about `max_tokens`
+/// tokens of file bodies each. The first part carries the summary and the
+/// tree of the whole repository; every part says which part it is.
+pub fn render_parts(
+    root_name: &str,
+    entries: &[Entry],
+    opts: &Options,
+    max_tokens: usize,
+) -> Vec<String> {
+    let st = stats(entries);
+    let parts = split_parts(entries, max_tokens);
+    if parts.is_empty() {
+        return vec![render(root_name, entries, opts)];
+    }
+    let n = parts.len();
+    parts
+        .iter()
+        .enumerate()
+        .map(|(k, indices)| {
+            let mut emit = vec![false; entries.len()];
+            for &i in indices {
+                emit[i] = true;
+            }
+            let body = Body {
+                emit,
+                omitted: 0,
+                part: Some((k + 1, n)),
+            };
+            match opts.format {
+                Format::Md => render_md(root_name, entries, opts, &st, &body),
+                Format::Xml => render_xml(root_name, entries, opts, &st, &body),
+            }
+        })
+        .collect()
 }
 
 /// Render just the collected file paths, one per line (already sorted).
@@ -462,9 +711,7 @@ pub fn top_token_files(entries: &[Entry], n: usize) -> Vec<(&str, usize)> {
     let mut files: Vec<(&str, usize)> = entries
         .iter()
         .filter_map(|e| match &e.kind {
-            EntryKind::Text(content) => {
-                Some((e.rel_path.as_str(), approx_tokens(content.chars().count())))
-            }
+            EntryKind::Text(content) => Some((e.rel_path.as_str(), estimate_tokens(content))),
             _ => None,
         })
         .collect();
@@ -482,7 +729,7 @@ fn summary_lines(entries: &[Entry], st: &Stats, opts: &Options) -> Vec<String> {
         format!("- Text size: {} bytes", st.text_bytes),
     ];
     if opts.tokens {
-        lines.push(format!("- Approx tokens: ~{}", approx_tokens(st.chars)));
+        lines.push(format!("- Approx tokens: ~{}", st.tokens));
         let top = top_token_files(entries, TOP_FILES);
         if !top.is_empty() {
             let list: Vec<String> = top
@@ -495,80 +742,113 @@ fn summary_lines(entries: &[Entry], st: &Stats, opts: &Options) -> Vec<String> {
     lines
 }
 
-fn render_md(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) -> String {
+fn render_md(
+    root_name: &str,
+    entries: &[Entry],
+    opts: &Options,
+    st: &Stats,
+    body: &Body,
+) -> String {
     let mut out = String::new();
-    out.push_str(&format!("# Repository: {root_name}\n\n"));
-    out.push_str("## Summary\n\n");
-    for line in summary_lines(entries, st, opts) {
-        out.push_str(&line);
-        out.push('\n');
+    let first = body.part.is_none_or(|(k, _)| k == 1);
+    match body.part {
+        Some((k, n)) => out.push_str(&format!("# Repository: {root_name} (part {k} of {n})\n\n")),
+        None => out.push_str(&format!("# Repository: {root_name}\n\n")),
     }
-    out.push('\n');
+    if first {
+        out.push_str("## Summary\n\n");
+        for line in summary_lines(entries, st, opts) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        if let Some((_, n)) = body.part {
+            out.push_str(&format!("- Split into {n} parts by token budget\n"));
+        }
+        out.push('\n');
 
-    if opts.tree {
-        out.push_str("## Structure\n\n```\n");
-        out.push_str(&render_tree(entries, opts.tokens));
-        out.push_str("```\n\n");
+        if opts.tree {
+            out.push_str("## Structure\n\n```\n");
+            out.push_str(&render_tree(entries, opts.tokens));
+            out.push_str("```\n\n");
+        }
     }
 
     if !opts.contents {
         return out;
     }
 
-    let plan = plan_budget(entries, opts.max_tokens);
     out.push_str("## Files\n\n");
-    let mut emitted = 0usize;
-    for e in entries {
-        if let EntryKind::Text(content) = &e.kind {
-            if emitted >= plan.included {
-                break;
-            }
-            emitted += 1;
-            let fence = fence_for(content);
-            // Wrap the path in inline code unless it contains a backtick, which
-            // inline code cannot represent; fall back to a plain heading then.
-            if e.rel_path.contains('`') {
-                out.push_str(&format!("### {}\n\n", e.rel_path));
-            } else {
-                out.push_str(&format!("### `{}`\n\n", e.rel_path));
-            }
-            out.push_str(&format!("{fence}{}\n", lang_for_path(&e.rel_path)));
-            out.push_str(content);
-            if !content.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str(&format!("{fence}\n\n"));
+    for (e, &emit) in entries.iter().zip(&body.emit) {
+        let EntryKind::Text(content) = &e.kind else {
+            continue;
+        };
+        if !emit {
+            continue;
         }
+        let fence = fence_for(content);
+        // Wrap the path in inline code unless it contains a backtick, which
+        // inline code cannot represent; fall back to a plain heading then.
+        if e.rel_path.contains('`') {
+            out.push_str(&format!("### {}\n\n", e.rel_path));
+        } else {
+            out.push_str(&format!("### `{}`\n\n", e.rel_path));
+        }
+        out.push_str(&format!("{fence}{}\n", lang_for_path(&e.rel_path)));
+        out.push_str(content);
+        if !content.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("{fence}\n\n"));
     }
-    if plan.omitted > 0 {
+    if body.omitted > 0 {
         out.push_str(&format!(
             "_{} more file(s) omitted (token budget)_\n",
-            plan.omitted
+            body.omitted
         ));
+    }
+    if let Some((k, n)) = body.part {
+        if k < n {
+            out.push_str(&format!("_Continued in part {} of {n}_\n", k + 1));
+        }
     }
     out
 }
 
-fn render_xml(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) -> String {
+fn render_xml(
+    root_name: &str,
+    entries: &[Entry],
+    opts: &Options,
+    st: &Stats,
+    body: &Body,
+) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "<repotome path=\"{}\">\n",
-        xml_attr_escape(root_name)
-    ));
-
-    out.push_str("  <summary>\n");
-    for line in summary_lines(entries, st, opts) {
-        out.push_str(&format!(
-            "    {}\n",
-            xml_escape(line.trim_start_matches("- "))
-        ));
+    let first = body.part.is_none_or(|(k, _)| k == 1);
+    match body.part {
+        Some((k, n)) => out.push_str(&format!(
+            "<repotome path=\"{}\" part=\"{k}\" parts=\"{n}\">\n",
+            xml_attr_escape(root_name)
+        )),
+        None => out.push_str(&format!(
+            "<repotome path=\"{}\">\n",
+            xml_attr_escape(root_name)
+        )),
     }
-    out.push_str("  </summary>\n");
 
-    if opts.tree {
-        out.push_str("  <structure>\n");
-        out.push_str(&xml_escape(&render_tree(entries, opts.tokens)));
-        out.push_str("  </structure>\n");
+    if first {
+        out.push_str("  <summary>\n");
+        for line in summary_lines(entries, st, opts) {
+            out.push_str(&format!(
+                "    {}\n",
+                xml_escape(line.trim_start_matches("- "))
+            ));
+        }
+        out.push_str("  </summary>\n");
+
+        if opts.tree {
+            out.push_str("  <structure>\n");
+            out.push_str(&xml_escape(&render_tree(entries, opts.tokens)));
+            out.push_str("  </structure>\n");
+        }
     }
 
     if !opts.contents {
@@ -576,29 +856,27 @@ fn render_xml(root_name: &str, entries: &[Entry], opts: &Options, st: &Stats) ->
         return out;
     }
 
-    let plan = plan_budget(entries, opts.max_tokens);
-    let mut emitted = 0usize;
-    for e in entries {
-        if let EntryKind::Text(content) = &e.kind {
-            if emitted >= plan.included {
-                break;
-            }
-            emitted += 1;
-            out.push_str(&format!(
-                "  <file path=\"{}\">\n",
-                xml_attr_escape(&e.rel_path)
-            ));
-            out.push_str(&xml_escape(content));
-            if !content.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str("  </file>\n");
+    for (e, &emit) in entries.iter().zip(&body.emit) {
+        let EntryKind::Text(content) = &e.kind else {
+            continue;
+        };
+        if !emit {
+            continue;
         }
+        out.push_str(&format!(
+            "  <file path=\"{}\">\n",
+            xml_attr_escape(&e.rel_path)
+        ));
+        out.push_str(&xml_escape(content));
+        if !content.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("  </file>\n");
     }
-    if plan.omitted > 0 {
+    if body.omitted > 0 {
         out.push_str(&format!(
             "  <omitted reason=\"token-budget\">{}</omitted>\n",
-            plan.omitted
+            body.omitted
         ));
     }
     out.push_str("</repotome>\n");
@@ -906,5 +1184,77 @@ mod tests {
         let md = render("demo", &binary_only, &opts);
         assert!(md.contains("- Approx tokens: ~0"));
         assert!(!md.contains("Top files:"));
+    }
+
+    #[test]
+    fn estimate_counts_non_ascii_characters_one_each() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("abcd"), 1);
+        assert_eq!(estimate_tokens("abcde"), 2);
+        assert_eq!(estimate_tokens("日本語"), 3);
+        assert_eq!(estimate_tokens("ab日本"), 3);
+    }
+
+    #[test]
+    fn split_parts_fills_each_part_up_to_the_budget() {
+        let entries = vec![
+            text_entry("a", 40), // 10 tokens
+            Entry {
+                rel_path: "bin".into(),
+                kind: EntryKind::Binary,
+            },
+            text_entry("b", 40),  // 10
+            text_entry("c", 200), // 50: over the budget alone
+            text_entry("d", 4),   // 1
+        ];
+        assert_eq!(
+            split_parts(&entries, 20),
+            vec![vec![0, 2], vec![3], vec![4]]
+        );
+        assert_eq!(split_parts(&entries, 1000), vec![vec![0, 2, 3, 4]]);
+        assert!(split_parts(&entries[1..2], 10).is_empty());
+    }
+
+    #[test]
+    fn render_parts_puts_the_map_in_part_one_and_names_every_part() {
+        let entries = vec![text_entry("a.rs", 40), text_entry("b.rs", 40)];
+        let opts = Options::default();
+        let parts = render_parts("demo", &entries, &opts, 10);
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].starts_with("# Repository: demo (part 1 of 2)"));
+        assert!(parts[0].contains("## Structure"));
+        assert!(parts[0].contains("- Split into 2 parts by token budget"));
+        assert!(parts[0].contains("### `a.rs`") && !parts[0].contains("### `b.rs`"));
+        assert!(parts[0].contains("_Continued in part 2 of 2_"));
+        assert!(parts[1].starts_with("# Repository: demo (part 2 of 2)"));
+        assert!(!parts[1].contains("## Structure"));
+        assert!(parts[1].contains("### `b.rs`") && !parts[1].contains("Continued"));
+
+        let xml = render_parts(
+            "demo",
+            &entries,
+            &Options {
+                format: Format::Xml,
+                ..Options::default()
+            },
+            10,
+        );
+        assert!(xml[1].starts_with("<repotome path=\"demo\" part=\"2\" parts=\"2\">"));
+        assert!(!xml[1].contains("<summary>"));
+    }
+
+    #[test]
+    fn presets_by_name_and_by_marker_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        let auto = preset_globs(&["auto".into()], dir.path()).unwrap();
+        assert!(auto.contains(&"**/target/**".to_string()));
+        assert!(auto.contains(&"**/node_modules/**".to_string()));
+        assert!(!auto.contains(&"**/__pycache__/**".to_string()));
+        // Named twice, globs once.
+        let go = preset_globs(&["go".into(), "php".into()], dir.path()).unwrap();
+        assert_eq!(go.iter().filter(|g| *g == "**/vendor/**").count(), 1);
+        assert!(preset_globs(&["cobol".into()], dir.path()).is_err());
     }
 }
