@@ -46,9 +46,17 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          bin="target/${{ matrix.target }}/release/repotome"
-          tar -czf "repotome-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" repotome
+          asset="repotome-${{ matrix.target }}.tar.gz"
+          tar -czf "$asset" -C "target/${{ matrix.target }}/release" repotome
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
       - name: Upload to release
         uses: softprops/action-gh-release@v3
         with:
-          files: repotome-${{ matrix.target }}.tar.gz
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256

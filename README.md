@@ -23,7 +23,8 @@ does it in one command, honoring `.gitignore` and skipping binaries.
 cargo install --git https://github.com/printemps-tokyo/repotome
 ```
 
-Prebuilt binaries will be attached to the [Releases](https://github.com/printemps-tokyo/repotome/releases) page once a version is tagged.
+Tagged [releases](https://github.com/printemps-tokyo/repotome/releases) carry prebuilt binaries for Linux (x86_64)
+and macOS (x86_64, Apple silicon), with SHA-256 checksums.
 
 ## Usage
 
